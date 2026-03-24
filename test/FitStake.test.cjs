@@ -12,8 +12,9 @@ describe("FitStake Contract", function () {
 
   const STAKE_AMOUNT = 100_000_000; // 100 USDC (6 decimals)
   const MINT_AMOUNT = 1_000_000_000; // 1000 USDC
+  const ZERO_BYTES32 = ethers.ZeroHash;
 
-  async function createDefaultChallenge(signer) {
+  async function createDefaultChallenge(signer, isPrivate = false, inviteCodeHash = ZERO_BYTES32) {
     const now = await time.latest();
     const joinDeadline = now + 3600; // 1 hour
     const deadline = now + 7200; // 2 hours
@@ -31,7 +32,9 @@ describe("FitStake Contract", function () {
       STAKE_AMOUNT,
       proofWindowHours,
       voteWindowHours,
-      graceHours
+      graceHours,
+      isPrivate,
+      inviteCodeHash
     );
   }
 
@@ -78,7 +81,7 @@ describe("FitStake Contract", function () {
       await usdc.approve(fitStake.target, STAKE_AMOUNT);
 
       await expect(
-        fitStake.createChallenge("Run", now - 100, now + 3600, STAKE_AMOUNT, 24, 24, 12)
+        fitStake.createChallenge("Run", now - 100, now + 3600, STAKE_AMOUNT, 24, 24, 12, false, ZERO_BYTES32)
       ).to.be.revertedWith("Join deadline must be in the future");
     });
 
@@ -87,7 +90,7 @@ describe("FitStake Contract", function () {
       await usdc.approve(fitStake.target, STAKE_AMOUNT);
 
       await expect(
-        fitStake.createChallenge("Run", now + 3600, now + 1800, STAKE_AMOUNT, 24, 24, 12)
+        fitStake.createChallenge("Run", now + 3600, now + 1800, STAKE_AMOUNT, 24, 24, 12, false, ZERO_BYTES32)
       ).to.be.revertedWith("Deadline must be after join deadline");
     });
 
@@ -95,7 +98,7 @@ describe("FitStake Contract", function () {
       const now = await time.latest();
 
       await expect(
-        fitStake.createChallenge("Run", now + 3600, now + 7200, STAKE_AMOUNT, 24, 24, 12)
+        fitStake.createChallenge("Run", now + 3600, now + 7200, STAKE_AMOUNT, 24, 24, 12, false, ZERO_BYTES32)
       ).to.be.reverted;
     });
   });
@@ -140,10 +143,16 @@ describe("FitStake Contract", function () {
       await fitStake.connect(addr1).joinChallenge(1);
     });
 
-    it("Should reject proof before activity deadline", async function () {
+    it("Should reject proof during joining phase", async function () {
       await expect(
         fitStake.submitProof(1, '{"workout":"5k run"}')
-      ).to.be.revertedWith("Activity period not ended yet");
+      ).to.be.revertedWith("Joining phase still active");
+    });
+
+    it("Should accept proof during active phase", async function () {
+      await time.increase(3601); // Past join deadline, into active phase
+      await fitStake.submitProof(1, '{"workout":"5k run"}');
+      expect(await fitStake.hasSubmittedProof(1, owner.address)).to.be.true;
     });
 
     it("Should accept proof after deadline and within proof window", async function () {
@@ -247,7 +256,7 @@ describe("FitStake Contract", function () {
       // Create a new challenge for this test
       const now = await time.latest();
       await usdc.approve(fitStake.target, STAKE_AMOUNT);
-      await fitStake.createChallenge("Test", now + 3600, now + 7200, STAKE_AMOUNT, 24, 24, 12);
+      await fitStake.createChallenge("Test", now + 3600, now + 7200, STAKE_AMOUNT, 24, 24, 12, false, ZERO_BYTES32);
       const challengeId = 2;
 
       await usdc.connect(addr1).approve(fitStake.target, STAKE_AMOUNT);
@@ -463,6 +472,184 @@ describe("FitStake Contract", function () {
       // Completed (past grace deadline)
       await time.increase(12 * 3600);
       expect(await fitStake.getChallengePhase(1)).to.equal(5); // Completed
+    });
+  });
+
+  describe("Private Challenges", function () {
+    it("Should create a private challenge and verify privacy info", async function () {
+      await createDefaultChallenge(owner, true);
+
+      const [isPrivate, hasInviteCode] = await fitStake.getChallengePrivacy(1);
+      expect(isPrivate).to.be.true;
+      expect(hasInviteCode).to.be.false;
+
+      const [isPrivate2, inviteCodeHash] = await fitStake.isChallengePrivate(1);
+      expect(isPrivate2).to.be.true;
+      expect(inviteCodeHash).to.equal(ZERO_BYTES32);
+    });
+
+    it("Should create a private challenge with invite code", async function () {
+      const inviteCode = "SECRET123";
+      const hash = ethers.solidityPackedKeccak256(["string"], [inviteCode]);
+      await createDefaultChallenge(owner, true, hash);
+
+      const [isPrivate, hasInviteCode] = await fitStake.getChallengePrivacy(1);
+      expect(isPrivate).to.be.true;
+      expect(hasInviteCode).to.be.true;
+    });
+
+    it("Should prevent non-approved user from joining private challenge", async function () {
+      await createDefaultChallenge(owner, true);
+
+      await usdc.connect(addr1).approve(fitStake.target, STAKE_AMOUNT);
+      await expect(
+        fitStake.connect(addr1).joinChallenge(1)
+      ).to.be.revertedWith("Not approved to join this private challenge");
+    });
+
+    it("Should allow request-to-join, approve, then join flow", async function () {
+      await createDefaultChallenge(owner, true);
+
+      // Request to join
+      await fitStake.connect(addr1).requestToJoin(1);
+      expect(await fitStake.hasRequestedToJoin(1, addr1.address)).to.be.true;
+
+      // Check pending requests
+      const requests = await fitStake.getJoinRequests(1);
+      expect(requests.length).to.equal(1);
+      expect(requests[0]).to.equal(addr1.address);
+
+      // Approve
+      await fitStake.approveJoinRequest(1, addr1.address);
+      expect(await fitStake.isApprovedToJoin(1, addr1.address)).to.be.true;
+
+      // Now join
+      await usdc.connect(addr1).approve(fitStake.target, STAKE_AMOUNT);
+      await fitStake.connect(addr1).joinChallenge(1);
+
+      const participants = await fitStake.getParticipants(1);
+      expect(participants.length).to.equal(2);
+    });
+
+    it("Should allow reject and re-request", async function () {
+      await createDefaultChallenge(owner, true);
+
+      // Request
+      await fitStake.connect(addr1).requestToJoin(1);
+      expect(await fitStake.hasRequestedToJoin(1, addr1.address)).to.be.true;
+
+      // Reject
+      await fitStake.rejectJoinRequest(1, addr1.address);
+      expect(await fitStake.hasRequestedToJoin(1, addr1.address)).to.be.false;
+
+      // Re-request
+      await fitStake.connect(addr1).requestToJoin(1);
+      expect(await fitStake.hasRequestedToJoin(1, addr1.address)).to.be.true;
+    });
+
+    it("Should prevent non-creator from approving", async function () {
+      await createDefaultChallenge(owner, true);
+
+      await fitStake.connect(addr1).requestToJoin(1);
+
+      await expect(
+        fitStake.connect(addr2).approveJoinRequest(1, addr1.address)
+      ).to.be.revertedWith("Only creator can approve");
+    });
+
+    it("Should prevent non-creator from rejecting", async function () {
+      await createDefaultChallenge(owner, true);
+
+      await fitStake.connect(addr1).requestToJoin(1);
+
+      await expect(
+        fitStake.connect(addr2).rejectJoinRequest(1, addr1.address)
+      ).to.be.revertedWith("Only creator can reject");
+    });
+
+    it("Should allow join with correct invite code", async function () {
+      const inviteCode = "SECRET123";
+      const hash = ethers.solidityPackedKeccak256(["string"], [inviteCode]);
+      await createDefaultChallenge(owner, true, hash);
+
+      await usdc.connect(addr1).approve(fitStake.target, STAKE_AMOUNT);
+      await fitStake.connect(addr1).joinWithInviteCode(1, inviteCode);
+
+      const participants = await fitStake.getParticipants(1);
+      expect(participants.length).to.equal(2);
+      expect(await fitStake.isApprovedToJoin(1, addr1.address)).to.be.true;
+    });
+
+    it("Should revert with wrong invite code", async function () {
+      const inviteCode = "SECRET123";
+      const hash = ethers.solidityPackedKeccak256(["string"], [inviteCode]);
+      await createDefaultChallenge(owner, true, hash);
+
+      await usdc.connect(addr1).approve(fitStake.target, STAKE_AMOUNT);
+      await expect(
+        fitStake.connect(addr1).joinWithInviteCode(1, "WRONGCODE")
+      ).to.be.revertedWith("Invalid invite code");
+    });
+
+    it("Should revert joinWithInviteCode when no invite code set", async function () {
+      await createDefaultChallenge(owner, true); // no invite code
+
+      await usdc.connect(addr1).approve(fitStake.target, STAKE_AMOUNT);
+      await expect(
+        fitStake.connect(addr1).joinWithInviteCode(1, "ANYCODE")
+      ).to.be.revertedWith("No invite code set");
+    });
+
+    it("Should revert request-to-join on public challenge", async function () {
+      await createDefaultChallenge(owner, false);
+
+      await expect(
+        fitStake.connect(addr1).requestToJoin(1)
+      ).to.be.revertedWith("Challenge is not private");
+    });
+
+    it("Should revert request-to-join after deadline", async function () {
+      await createDefaultChallenge(owner, true);
+
+      await time.increase(3601); // Past join deadline
+
+      await expect(
+        fitStake.connect(addr1).requestToJoin(1)
+      ).to.be.revertedWith("Join window has closed");
+    });
+
+    it("Should prevent duplicate request-to-join", async function () {
+      await createDefaultChallenge(owner, true);
+
+      await fitStake.connect(addr1).requestToJoin(1);
+
+      await expect(
+        fitStake.connect(addr1).requestToJoin(1)
+      ).to.be.revertedWith("Already requested to join");
+    });
+
+    it("Should emit correct events for private challenge flow", async function () {
+      await createDefaultChallenge(owner, true);
+
+      // JoinRequested event
+      await expect(fitStake.connect(addr1).requestToJoin(1))
+        .to.emit(fitStake, "JoinRequested")
+        .withArgs(1, addr1.address);
+
+      // JoinRequestApproved event
+      await expect(fitStake.approveJoinRequest(1, addr1.address))
+        .to.emit(fitStake, "JoinRequestApproved")
+        .withArgs(1, addr1.address, owner.address);
+    });
+
+    it("Should emit JoinRequestRejected event", async function () {
+      await createDefaultChallenge(owner, true);
+
+      await fitStake.connect(addr1).requestToJoin(1);
+
+      await expect(fitStake.rejectJoinRequest(1, addr1.address))
+        .to.emit(fitStake, "JoinRequestRejected")
+        .withArgs(1, addr1.address, owner.address);
     });
   });
 });

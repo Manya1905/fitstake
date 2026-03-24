@@ -3,7 +3,14 @@ require("dotenv").config();
 
 module.exports = {
   solidity: {
-    version: "0.8.28"
+    version: "0.8.28",
+    settings: {
+      viaIR: true,
+      optimizer: {
+        enabled: true,
+        runs: 200,
+      },
+    },
   },
   networks: {
     baseSepolia: {

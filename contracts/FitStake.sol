@@ -35,12 +35,18 @@ contract FitStake {
         mapping(address => bool) hasVotedAtAll;
         bool isDistributed;
         uint256 totalStaked;
+        // Private challenge fields
+        bool isPrivate;
+        bytes32 inviteCodeHash;
+        mapping(address => bool) joinRequested;
+        address[] joinRequestList;
+        mapping(address => bool) isApproved;
     }
 
     IERC20 public usdc;
 
     // St. Jude's charity address
-    address public constant CHARITY_ADDRESS = 0x5B38Da6a701c568545dCfcB03FcB875f56beddC4;
+    address public constant CHARITY_ADDRESS = 0x89e873251a6e37BbBb4800C64F8f20823e571975;
 
     uint256 public challengeCount;
 
@@ -60,6 +66,9 @@ contract FitStake {
     event VotesCast(uint256 indexed challengeId, address indexed voter, uint256 approvalCount, uint256 rejectionCount);
     event RewardsDistributed(uint256 indexed challengeId, uint256 totalSucceeded, uint256 totalFailed);
     event CharityDonation(uint256 indexed challengeId, uint256 amount);
+    event JoinRequested(uint256 indexed challengeId, address indexed requester);
+    event JoinRequestApproved(uint256 indexed challengeId, address indexed user, address indexed approvedBy);
+    event JoinRequestRejected(uint256 indexed challengeId, address indexed user, address indexed rejectedBy);
 
     constructor(address _usdcAddress) {
         usdc = IERC20(_usdcAddress);
@@ -72,7 +81,9 @@ contract FitStake {
         uint256 _stakeAmount,
         uint256 _proofWindowHours,
         uint256 _voteWindowHours,
-        uint256 _graceHours
+        uint256 _graceHours,
+        bool _isPrivate,
+        bytes32 _inviteCodeHash
     ) external returns (uint256) {
         require(_joinDeadline > block.timestamp, "Join deadline must be in the future");
         require(_deadline > _joinDeadline, "Deadline must be after join deadline");
@@ -98,10 +109,13 @@ contract FitStake {
         c.stakeAmount = _stakeAmount;
         c.totalStaked = _stakeAmount;
         c.isDistributed = false;
+        c.isPrivate = _isPrivate;
+        c.inviteCodeHash = _inviteCodeHash;
 
-        // Creator automatically joins
+        // Creator automatically joins (no approval needed)
         c.participants.push(msg.sender);
         c.hasJoined[msg.sender] = true;
+        c.isApproved[msg.sender] = true;
 
         emit ChallengeCreated(challengeId, msg.sender, _goal, _joinDeadline, _deadline, _stakeAmount);
         emit ParticipantJoined(challengeId, msg.sender, _stakeAmount);
@@ -115,6 +129,78 @@ contract FitStake {
         require(c.id != 0, "Challenge does not exist");
         require(block.timestamp < c.joinDeadline, "Join window has closed");
         require(!c.hasJoined[msg.sender], "Already joined this challenge");
+
+        // Private challenges require approval first
+        if (c.isPrivate) {
+            require(c.isApproved[msg.sender], "Not approved to join this private challenge");
+        }
+
+        require(usdc.transferFrom(msg.sender, address(this), c.stakeAmount), "USDC transfer failed");
+
+        c.participants.push(msg.sender);
+        c.hasJoined[msg.sender] = true;
+        c.totalStaked += c.stakeAmount;
+
+        emit ParticipantJoined(_challengeId, msg.sender, c.stakeAmount);
+    }
+
+    function requestToJoin(uint256 _challengeId) external {
+        Challenge storage c = challenges[_challengeId];
+
+        require(c.id != 0, "Challenge does not exist");
+        require(c.isPrivate, "Challenge is not private");
+        require(block.timestamp < c.joinDeadline, "Join window has closed");
+        require(!c.hasJoined[msg.sender], "Already joined this challenge");
+        require(!c.joinRequested[msg.sender], "Already requested to join");
+
+        c.joinRequested[msg.sender] = true;
+        c.joinRequestList.push(msg.sender);
+
+        emit JoinRequested(_challengeId, msg.sender);
+    }
+
+    function approveJoinRequest(uint256 _challengeId, address _user) external {
+        Challenge storage c = challenges[_challengeId];
+
+        require(c.id != 0, "Challenge does not exist");
+        require(msg.sender == c.creator, "Only creator can approve");
+        require(c.isPrivate, "Challenge is not private");
+        require(c.joinRequested[_user], "User has not requested to join");
+        require(!c.isApproved[_user], "User already approved");
+
+        c.isApproved[_user] = true;
+
+        emit JoinRequestApproved(_challengeId, _user, msg.sender);
+    }
+
+    function rejectJoinRequest(uint256 _challengeId, address _user) external {
+        Challenge storage c = challenges[_challengeId];
+
+        require(c.id != 0, "Challenge does not exist");
+        require(msg.sender == c.creator, "Only creator can reject");
+        require(c.isPrivate, "Challenge is not private");
+        require(c.joinRequested[_user], "User has not requested to join");
+
+        c.joinRequested[_user] = false;
+
+        emit JoinRequestRejected(_challengeId, _user, msg.sender);
+    }
+
+    function joinWithInviteCode(uint256 _challengeId, string memory _inviteCode) external {
+        Challenge storage c = challenges[_challengeId];
+
+        require(c.id != 0, "Challenge does not exist");
+        require(c.isPrivate, "Challenge is not private");
+        require(c.inviteCodeHash != bytes32(0), "No invite code set");
+        require(
+            keccak256(abi.encodePacked(_inviteCode)) == c.inviteCodeHash,
+            "Invalid invite code"
+        );
+        require(block.timestamp < c.joinDeadline, "Join window has closed");
+        require(!c.hasJoined[msg.sender], "Already joined this challenge");
+
+        // Auto-approve and join
+        c.isApproved[msg.sender] = true;
 
         require(usdc.transferFrom(msg.sender, address(this), c.stakeAmount), "USDC transfer failed");
 
@@ -130,7 +216,7 @@ contract FitStake {
 
         require(c.id != 0, "Challenge does not exist");
         require(c.hasJoined[msg.sender], "Not a participant");
-        require(block.timestamp >= c.deadline, "Activity period not ended yet");
+        require(block.timestamp > c.joinDeadline, "Joining phase still active");
         require(block.timestamp <= c.proofDeadline, "Proof submission window has closed");
         require(!c.hasSubmitted[msg.sender], "Already submitted proof");
         require(!c.isDistributed, "Rewards already distributed");
@@ -337,6 +423,14 @@ contract FitStake {
         );
     }
 
+    function getChallengePrivacy(uint256 _challengeId) external view returns (
+        bool _isPrivate,
+        bool hasInviteCode
+    ) {
+        Challenge storage c = challenges[_challengeId];
+        return (c.isPrivate, c.inviteCodeHash != bytes32(0));
+    }
+
     function getParticipants(uint256 _challengeId) external view returns (address[] memory) {
         return challenges[_challengeId].participants;
     }
@@ -357,12 +451,49 @@ contract FitStake {
         return (challenges[_challengeId].votesFor[_participant], challenges[_challengeId].votesAgainst[_participant]);
     }
 
-    function getVoteStatus(uint256 _challengeId, address _voter, address _participant) external view returns (bool hasVoted, bool approved) {
+    function getVoteStatus(uint256 _challengeId, address _voter, address _participant) external view returns (bool hasVotedOnParticipant, bool approved) {
         Challenge storage c = challenges[_challengeId];
         return (c.hasVoted[_voter][_participant], c.votes[_voter][_participant]);
     }
 
     function hasVotedAtAll(uint256 _challengeId, address _voter) external view returns (bool) {
         return challenges[_challengeId].hasVotedAtAll[_voter];
+    }
+
+    // Private challenge view functions
+
+    function getJoinRequests(uint256 _challengeId) external view returns (address[] memory) {
+        Challenge storage c = challenges[_challengeId];
+        // Count pending requests
+        uint256 pendingCount = 0;
+        for (uint256 i = 0; i < c.joinRequestList.length; i++) {
+            if (c.joinRequested[c.joinRequestList[i]] && !c.isApproved[c.joinRequestList[i]] && !c.hasJoined[c.joinRequestList[i]]) {
+                pendingCount++;
+            }
+        }
+
+        address[] memory pending = new address[](pendingCount);
+        uint256 idx = 0;
+        for (uint256 i = 0; i < c.joinRequestList.length; i++) {
+            address addr = c.joinRequestList[i];
+            if (c.joinRequested[addr] && !c.isApproved[addr] && !c.hasJoined[addr]) {
+                pending[idx] = addr;
+                idx++;
+            }
+        }
+        return pending;
+    }
+
+    function isApprovedToJoin(uint256 _challengeId, address _user) external view returns (bool) {
+        return challenges[_challengeId].isApproved[_user];
+    }
+
+    function hasRequestedToJoin(uint256 _challengeId, address _user) external view returns (bool) {
+        return challenges[_challengeId].joinRequested[_user];
+    }
+
+    function isChallengePrivate(uint256 _challengeId) external view returns (bool _isPrivate, bytes32 _inviteCodeHash) {
+        Challenge storage c = challenges[_challengeId];
+        return (c.isPrivate, c.inviteCodeHash);
     }
 }
