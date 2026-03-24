@@ -216,7 +216,6 @@ contract FitStake {
 
         require(c.id != 0, "Challenge does not exist");
         require(c.hasJoined[msg.sender], "Not a participant");
-        require(block.timestamp > c.joinDeadline, "Joining phase still active");
         require(block.timestamp <= c.proofDeadline, "Proof submission window has closed");
         require(!c.hasSubmitted[msg.sender], "Already submitted proof");
         require(!c.isDistributed, "Rewards already distributed");
