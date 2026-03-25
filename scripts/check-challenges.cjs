@@ -1,7 +1,8 @@
 const hre = require("hardhat");
 
 async function main() {
-  const contract = await hre.ethers.getContractAt("FitStake", "0x920082097e3E0b6F449fdC2225c4a8E3492b6F7C");
+  const contractAddress = process.env.FITSTAKE_ADDRESS || "0x13a1EC1b4e17D417B23c52adfFCAC978B6e8cB26";
+  const contract = await hre.ethers.getContractAt("FitStake", contractAddress);
   const count = await contract.challengeCount();
   console.log("Total challenges:", Number(count));
 
@@ -24,19 +25,13 @@ async function main() {
     console.log("  Vote deadline:", new Date(Number(c.voteDeadline) * 1000).toLocaleString(), Number(c.voteDeadline) < now ? "(PASSED)" : "(PENDING)");
     console.log("  Grace deadline:", new Date(Number(c.graceDeadline) * 1000).toLocaleString(), Number(c.graceDeadline) < now ? "(PASSED)" : "(PENDING)");
 
-    // Check proof status for known wallets
-    const wallets = [
-      "0xd24f66289cb3bdd3094be85a2225285479a7aa7a",
-      "0xA0f88Dd39dAD31bd4cA7eC7d7BCA47dD2858001C"
-    ];
-    for (const w of wallets) {
+    // Check proof status for all participants
+    const participants = await contract.getParticipants(i);
+    for (const w of participants) {
       try {
-        const joined = await contract.hasJoinedChallenge(i, w);
         const submitted = await contract.hasSubmittedProof(i, w);
         const voted = await contract.hasVotedAtAll(i, w);
-        if (joined) {
-          console.log(`  Wallet ${w.slice(0,10)}...: joined=${joined}, proof=${submitted}, voted=${voted}`);
-        }
+        console.log(`  Wallet ${w.slice(0,10)}...: proof=${submitted}, voted=${voted}`);
       } catch (e) {}
     }
   }

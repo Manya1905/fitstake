@@ -71,6 +71,7 @@ contract FitStake {
     event JoinRequestRejected(uint256 indexed challengeId, address indexed user, address indexed rejectedBy);
 
     constructor(address _usdcAddress) {
+        require(_usdcAddress != address(0), "USDC address cannot be zero");
         usdc = IERC20(_usdcAddress);
     }
 

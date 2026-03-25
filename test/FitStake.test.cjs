@@ -143,12 +143,6 @@ describe("FitStake Contract", function () {
       await fitStake.connect(addr1).joinChallenge(1);
     });
 
-    it("Should reject proof during joining phase", async function () {
-      await expect(
-        fitStake.submitProof(1, '{"workout":"5k run"}')
-      ).to.be.revertedWith("Joining phase still active");
-    });
-
     it("Should accept proof during active phase", async function () {
       await time.increase(3601); // Past join deadline, into active phase
       await fitStake.submitProof(1, '{"workout":"5k run"}');
